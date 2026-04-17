@@ -2,58 +2,48 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Company Docs Search Skill</title>
+<title>Company Docs Search Skill (Debug)</title>
 </head>
 <body>
 <script>
 // =====================================================
-// 社内文書検索 Skill
-// =====================================================
-// 呼び出し仕様:
-//   Gemma 4 が {"query": "..."} を stringify して渡してくる
-//   → PC上のFAISS検索サーバーに fetch() でリクエスト
-//   → 結果を stringify して返す
+// 社内文書検索 Skill (デバッグ版)
+// エラー時に詳細情報を result として返すので、
+// 画面上でエラーの詳細が見えるようになります
 // =====================================================
 
-// ★★★ ここを自分のPCのIPアドレスに書き換えてください ★★★
 const SEARCH_API_URL = "https://woven-awning-lanky.ngrok-free.dev/search";
-// 例: "http://172.17.61.100:8001/search"
-// PCでsearch_server.pyを起動したときに表示されるIPを使ってください
 
-// タイムアウト（ミリ秒）: 社内Wi-Fiなら5秒で十分なはず
-const TIMEOUT_MS = 10000;
+const TIMEOUT_MS = 15000;
 
 
-/**
- * Gemma 4 からコールされるエントリーポイント
- * @param {string} data - LLMが生成したJSON文字列（{"query": "..."} 形式）
- * @returns {string} - 結果を含むJSON文字列
- */
 async function ai_edge_gallery_get_result(data) {
-  console.log("Skill called with data:", data);
+  const debug = [];
+  debug.push("[DEBUG] Skill called");
+  debug.push("[DEBUG] Endpoint: " + SEARCH_API_URL);
 
-  // ① 入力をパース
   let params;
   try {
     params = JSON.parse(data);
+    debug.push("[DEBUG] Input parsed: " + JSON.stringify(params));
   } catch (e) {
     return JSON.stringify({
-      error: "入力パラメータのJSON解析に失敗しました: " + e.message
+      result: debug.join("\n") + "\n\n[ERROR] JSON解析失敗: " + e.message + "\n入力data: " + data
     });
   }
 
   const query = (params.query || "").trim();
   if (!query) {
     return JSON.stringify({
-      error: "queryパラメータが空です"
+      result: debug.join("\n") + "\n\n[ERROR] queryが空です"
     });
   }
 
-  // ② PC側のAPIを呼び出し
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
+    debug.push("[DEBUG] Starting fetch...");
     const res = await fetch(SEARCH_API_URL, {
       method: "POST",
       headers: { 
@@ -63,52 +53,54 @@ async function ai_edge_gallery_get_result(data) {
       body: JSON.stringify({ query: query }),
       signal: controller.signal
     });
-
     clearTimeout(timer);
+    debug.push("[DEBUG] Fetch responded, status=" + res.status);
 
     if (!res.ok) {
+      const bodyText = await res.text();
       return JSON.stringify({
-        error: "検索サーバーがエラーを返しました: HTTP " + res.status
+        result: debug.join("\n") + "\n\n[ERROR] HTTP " + res.status + "\nBody: " + bodyText.substring(0, 500)
       });
     }
 
     const json = await res.json();
+    debug.push("[DEBUG] JSON parsed, results count=" + (json.results ? json.results.length : 0));
 
-    // ③ 結果を整形してLLMへ返す
     if (!json.results || json.results.length === 0) {
       return JSON.stringify({
-        result: "検索結果が0件でした。質問に該当する社内文書は見つかりませんでした。"
+        result: debug.join("\n") + "\n\n[結果] 検索結果が0件でした。"
       });
     }
 
-    // LLMが読みやすいようにテキスト形式で整形
     const formatted = json.results.map(r => {
-      return `【文書${r.index}】ファイル名: ${r.filename}\n` +
-             `内容:\n${r.snippet}`;
+      return `【文書${r.index}】${r.filename}\n${r.snippet}`;
     }).join("\n\n---\n\n");
 
     return JSON.stringify({
-      result: `クエリ「${json.query}」の検索結果（${json.results.length}件）:\n\n${formatted}`
+      result: `検索結果(${json.results.length}件):\n\n${formatted}`
     });
 
   } catch (e) {
     clearTimeout(timer);
+    debug.push("[DEBUG] Exception: " + e.name + " - " + e.message);
+    
+    let errMsg = "";
     if (e.name === "AbortError") {
-      return JSON.stringify({
-        error: "検索サーバーへの接続がタイムアウトしました。PCのサーバーが起動中か、同じWi-Fiに接続されているか確認してください。"
-      });
+      errMsg = "タイムアウト(15秒)";
+    } else if (e.name === "TypeError") {
+      errMsg = "ネットワークエラー(fetch失敗): " + e.message;
+    } else {
+      errMsg = e.name + ": " + e.message;
     }
+    
     return JSON.stringify({
-      error: "検索サーバーへの接続に失敗しました: " + e.message +
-             "（接続先: " + SEARCH_API_URL + "）"
+      result: debug.join("\n") + "\n\n[ERROR] " + errMsg
     });
   }
 }
 
-// ★重要★ Skillランタイムが呼び出せるように window にバインド
 window.ai_edge_gallery_get_result = ai_edge_gallery_get_result;
-
-console.log("Company docs search skill loaded. Endpoint:", SEARCH_API_URL);
+console.log("Skill loaded. Endpoint:", SEARCH_API_URL);
 </script>
 </body>
 </html>
